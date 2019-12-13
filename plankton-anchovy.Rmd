@@ -1,0 +1,479 @@
+---
+title: "Regulation of fish stocks without stock-recruitment relationships: the case of small pelagic fish"
+output: 
+  html_notebook:
+    toc: true
+fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mizer)
+library(reshape2)
+library(magrittr)
+library(plotly)
+```
+
+The code below reproduces key computations from the paper "
+Regulation of fish stocks without stock-recruitment relationships: the case of 
+small pelagic fish" by Mariella Canales, Gustav Delius and Richard Law, using 
+the R package mizer to implement the size-spectrum model. This notebook should 
+be used after reading that paper. 
+
+# Setting up the model
+We set up the model according to the description in the paper in Appendix A,
+with the parameters from Appendix B, but without diffusion (term (e) in 
+equation (A.1)). 
+
+## Parameters
+We create a list holding the model parameters
+```{r}
+p <- list(
+    dt = 0.001,
+    dx = 0.1,
+    w_min = 0.0003,
+    w_inf = 66.5,
+    ppmr_min = 100,
+    ppmr_max = 30000,
+    gamma = 750,
+    alpha = 0.85, # q
+    K = 0.1, # alpha
+    # Larval mortality
+    mu_l = 0,
+    w_l = 0.03,
+    rho_l = 5,
+    # background mortality
+    mu_0 = 1,
+    rho_b = -0.25,
+    # Senescent mortality
+    w_s = 0.5,
+    rho_s = 1,
+    # reproduction
+    w_mat = 10,
+    rho_m = 15,
+    rho_inf = 0.2,
+    epsilon_R = 0.1,
+    # plankton
+    w_pp_cutoff = 0.1,
+    r0 = 10,
+    a0 = 100,
+    i0 = 100,
+    rho = 0.85,
+    lambda = 2
+)
+```
+
+## Mortality
+We define a function for setting the background and larval mortality as 
+described in equations (A.5) and (A.6).
+```{r}
+setAnchovyMort <- 
+  function(params, p) {
+    mu_b <- rep(0, length(params@w))
+    mu_b[params@w <= p$w_s] <- 
+      (p$mu_0 * (params@w / p$w_min)^p$rho_b)[params@w < p$w_s]
+    if (p$mu_0 > 0) {
+      mu_s <- min(mu_b[params@w <= p$w_s])
+    } else {
+      mu_s <- p$mu_s
+    }
+    mu_b[params@w >= p$w_s] <- 
+      (mu_s * (params@w / p$w_s)^p$rho_s)[params@w >= p$w_s]
+    # Add larval mortality
+    mu_b <- mu_b + p$mu_l / (1 + (params@w / p$w_l)^p$rho_l)
+    
+    params@mu_b[] <- mu_b
+    return(params)
+  }
+```
+
+## Plankton dynamics
+To prepare for random changes in plankton carrying capacity every half year,
+we create an environment to maintain state between function calls.
+```{r}
+plankton_state <- new.env(parent = emptyenv())
+plankton_state$time <- 0
+plankton_state$factor <- 1
+plankton_state$random <- FALSE
+```
+
+We implement the logistic plankton dynamics with immigration, as described in
+equation (A.11)
+```{r}
+plankton_logistic <- function(params, 
+                              n = params@initial_n, 
+                              n_pp = params@initial_n_pp, 
+                              B = params@initial_B, 
+                              rates = getRates(params), 
+                              dt = 0.1, ...) {
+    plankton_state$time <- plankton_state$time + dt
+    if (plankton_state$random && plankton_state$time >= 0.5) {
+        plankton_state$factor <- exp(runif(1, log(1/2), log(2)))
+        plankton_state$time <- 0
+    }
+    f <- params@rr_pp * n_pp * (1 - n_pp / params@cc_pp / plankton_state$factor) + 
+        i - rates$plankton_mort * n_pp 
+    f[is.na(f)] <- 0
+    return(n_pp + dt * f)
+}
+```
+
+## Feeding kernel
+We define the feeding kernel described in equation (A.2)
+```{r}
+norm_box_pred_kernel <- function(ppmr, ppmr_min, ppmr_max) {
+    phi <- rep(1, length(ppmr))
+    phi[ppmr > ppmr_max] <- 0
+    phi[ppmr < ppmr_min] <- 0
+    # Do not allow feeding at own size
+    phi[1] <- 0
+    # normalise in log space
+    logppmr <- log(ppmr)
+    dl <- logppmr[2] - logppmr[1]
+    N <- sum(phi) * dl
+    phi <- phi / N
+    return(phi)
+}
+```
+
+## Set model
+We are now ready to set up the MizerParams object describing the 
+Anchovy - Plankton model from the paper:
+```{r message=FALSE}
+setModel <- function(p) {
+  kappa = p$a0 * exp(-6.9*(p$lambda - 1))
+  n = 2/3 # irrelevant value
+  
+  species_params <- data.frame(
+    species = "Anchovy",
+    w_min = p$w_min,
+    w_mat = p$w_mat,
+    m = p$rho_inf + n,
+    w_inf = p$w_inf,
+    erepro = p$epsilon_R,
+    alpha = p$K,
+    ks = 0,
+    gamma = p$gamma,
+    ppmr_min = p$ppmr_min,
+    ppmr_max = p$ppmr_max,
+    pred_kernel_type = "norm_box",
+    h = Inf,
+    R_max = Inf,
+    linecolour = "brown")
+  
+  no_w <- round(log(p$w_inf / p$w_min) / p$dx)
+  
+  params <- set_multispecies_model(
+    no_w = no_w,
+    species_params,
+    lambda = p$lambda,
+    kappa = kappa,
+    w_pp_cutoff = p$w_pp_cutoff,
+    q = p$alpha,
+    plankton_dynamics = plankton_logistic)
+
+  params@rr_pp[] <- p$r0 * params@w_full^(p$rho - 1)
+  return(params)
+}
+
+params <- setModel(p)
+i <- p$i0 * params@w_full^(-params@lambda) * exp(-6.9*(params@lambda - 1))
+```
+
+# Without larval mortality or cannibalism
+We first run the model without larval mortality and without cannibalism
+```{r}
+p$mu_l <- 0
+params <- setAnchovyMort(params, p)
+params@interaction[] <- 0
+```
+
+We set an initial abundance and run for 10 years.
+```{r}
+params@initial_n[] <- 0.001 * params@w^(-1.8)
+params@initial_n_pp[] <- params@cc_pp
+sim <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
+```
+
+At this point we reduce the anchovy abundance by an overall factor of 10^7
+and then run the simulation for a further 30 years.
+
+```{r}
+sim@n[11, , ] <- sim@n[11, , ] / 10^7
+sim <- project(sim, t_max = 30, dt = p$dt, t_save = 0.2, progress_bar = FALSE)
+```
+
+## Figure 2a
+Plotting the spectra at year 30 gives Figure 2a. Here we plot the 
+plankton spectrum and the anchovy spectrum using the same y-axis.
+Figure 2a in the paper uses different axes.
+```{r}
+plotSpectra(sim, power = 2, wlim = c(1e-8, NA), ylim = c(1e-5, NA),
+            time_range = 30)
+```
+
+This does not look exactly the same as the corresponding graph in the paper
+because the pile-up is not smoothed by diffusion, but it displays the same 
+qualitative behaviour.
+
+
+
+## Figure 2b
+Figure 2b plots the death rate on the anchovy as a function of anchovy body 
+size.
+```{r}
+t <- as.numeric(dimnames(sim@n)$time) == 30
+mort <- getMort(params, n = sim@n[t, , ],
+                n_pp = sim@n_pp[t, ], effort = 0)
+mort <- melt(mort)
+plot_ly(mort) %>% 
+    add_lines(x = ~w_prey, y = ~value) %>% 
+    layout(p, xaxis = list(type = "log", exponentformat = "power",
+                           title_text = "body mass (g)"),
+           yaxis = list(title_text = "death rate (1/year)"))
+```
+
+
+## Figure 2c
+```{r message=FALSE, warning=FALSE}
+abm <- melt(getBiomass(sim))
+pbm <- sim@n_pp %*% (params@w_full * params@dw_full)
+pbm <- melt(pbm)
+pbm$Var2 <- NULL
+pbm$sp = "Plankton"
+bm <- rbind(pbm, abm)
+plot_ly(bm) %>% 
+    filter(time >= 10) %>% 
+    add_lines(x = ~time, y = ~value, color = ~sp) %>% 
+    # Use logarithmic axes
+    layout(p, yaxis = list(type = "log", exponentformat = "power",
+                           title_text = "biomass (g/m^3)"),
+           xaxis = list(title_text = "time (year)"))
+```
+
+
+# With cannibalism
+Turn on cannibalism
+```{r}
+params@interaction[] <- 1
+```
+
+We set an initial abundance and run for 10 years.
+```{r}
+params@initial_n[] <- 0.001 * params@w^(-1.8)
+params@initial_n_pp[] <- params@cc_pp
+simc <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
+```
+
+At this point we reduce the anchovy abundance by an overall factor of 10^7
+and then run the simulation for a further 30 years.
+
+```{r}
+simc@n[11, , ] <- simc@n[11, , ] / 10^7
+simc <- project(simc, t_max = 30, dt = p$dt, t_save = 0.2, progress_bar = FALSE)
+```
+
+
+## Figure 2d
+While Figure 2d shows the background death and the larval death separately,
+here for simplicity we plot only their sum.
+```{r}
+t <- as.numeric(dimnames(simc@n)$time) == 36.8
+mort <- getMort(params, n = simc@n[t, , ],
+                n_pp = simc@n_pp[t, ], effort = 0)
+mort <- melt(mort)
+plot_ly(mort) %>% 
+    add_lines(x = ~w_prey, y = ~value) %>% 
+    layout(p, xaxis = list(type = "log", exponentformat = "power",
+                           title_text = "body mass (g)"),
+           yaxis = list(title_text = "death rate (1/year)"))
+```
+
+We made the plot for time = 36.8 years because the oscillations of the spectrum
+are shifted with respect to those in the paper, as the following figure shows.
+
+## Figure 2e
+```{r}
+abm <- melt(getBiomass(simc))
+abmr <- melt(getBiomass(simc, min_w = 0.01, max_w = 0.4))
+abmr$sp = "small Anchovy"
+pbm <- simc@n_pp %*% (params@w_full * params@dw_full)
+pbm <- melt(pbm)
+pbm$Var2 <- NULL
+pbm$sp = "Plankton"
+bm <- rbind(pbm, abm, abmr)
+plot_ly(bm) %>% 
+    filter(time >= 10) %>% 
+    add_lines(x = ~time, y = ~value, color = ~sp) %>% 
+    # Use logarithmic axes
+    layout(p, yaxis = list(type = "log", exponentformat = "power",
+                           title_text = "biomass (g/m^3)",
+                           range = c(-7, 2)),
+           xaxis = list(title_text = "time (year)"))
+```
+
+## Animation
+Here is an animation showing the evolution of the
+spectra from year 26 to year 40.
+```{r warning=FALSE}
+nf <- melt(simc@n)
+n_ppf <- melt(simc@n_pp)
+n_ppf$sp <- "Plankton"
+nf <- rbind(nf, n_ppf)
+
+plot_ly(nf) %>%
+    # show only part of plankton spectrum
+    filter(w > 10^-5) %>% 
+    # start at time 20
+    filter(time >= 26) %>% 
+    # calculate biomass density with respect to log size
+    mutate(b = value * w^2) %>% 
+    # Plot lines
+    add_lines(
+        x = ~w, y = ~b,
+        color = ~sp,
+        frame = ~time,
+        line = list(simplify = FALSE)
+    ) %>% 
+    # Use logarithmic axes
+    layout(p, xaxis = list(type = "log", exponentformat = "power",
+                           title_text = "body mass (g)"),
+           yaxis = list(type = "log", exponentformat = "power",
+                        title_text = "biomass (g/m^3)",
+                        range = c(-8, 0)))
+```
+
+# With larval mortality
+Turn on larval mortality
+```{r}
+p$mu_l <- 21
+params <- setAnchovyMort(params, p)
+```
+
+We set an initial abundance and run for 10 years.
+```{r}
+params@initial_n[] <- 0.001 * params@w^(-1.8)
+params@initial_n_pp[] <- params@cc_pp
+siml <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
+```
+
+At this point we reduce the anchovy abundance by an overall factor of 10^7
+and then run the simulation for a further 30 years.
+
+```{r}
+siml@n[11, , ] <- siml@n[11, , ] / 10^7
+siml <- project(siml, t_max = 30, dt = p$dt, t_save = 0.2, progress_bar = FALSE)
+```
+
+## Figure 2f
+I have not yet split the mortality up into its causes in the following figure. But overall it looks right.
+```{r}
+t <- as.numeric(dimnames(siml@n)$time) == 30
+mort <- getMort(params, n = siml@n[t, , ],
+                n_pp = siml@n_pp[t, ], effort = 0)
+mort <- melt(mort)
+plot_ly(mort) %>% 
+    add_lines(x = ~w_prey, y = ~value) %>% 
+    layout(p, xaxis = list(type = "log", exponentformat = "power",
+                           title_text = "body mass (g)"),
+           yaxis = list(title_text = "death rate (1/year)"))
+```
+
+## Figure 2g
+```{r warning=FALSE}
+abm <- melt(getBiomass(siml))
+pbm <- siml@n_pp %*% (params@w_full * params@dw_full)
+pbm <- melt(pbm)
+pbm$Var2 <- NULL
+pbm$sp = "Plankton"
+bm <- rbind(abm, pbm)
+plot_ly(bm) %>% 
+    filter(time >= 10) %>% 
+    add_lines(x = ~time, y = ~value, color = ~sp) %>% 
+    # Use logarithmic axes
+    layout(p, yaxis = list(type = "log", exponentformat = "power",
+                           title_text = "biomass (g/m^3)",
+                           range = c(-7, 2)),
+           xaxis = list(title_text = "time (year)"))
+```
+
+## Figure 3a
+
+```{r message=FALSE, warning=FALSE}
+gcp <- plotGrowthCurves(siml, max_age = 4)
+gcp + scale_y_continuous(trans = "log10")
+```
+
+## Figure 3b
+
+```{r}
+t_min_idx <- sum(as.numeric(dimnames(siml@n)$time) <= 15)
+t_max_idx <- dim(siml@n)[1]
+t_step_idx <- 1 / 0.2  # 1 year steps
+ssb <- getSSB(siml)[seq(t_min_idx, t_max_idx - t_step_idx, t_step_idx)]
+rec_idx <- sum(params@w < 10)
+n_rec <- siml@n[seq(t_min_idx + t_step_idx, t_max_idx, t_step_idx), , rec_idx]
+# Convert to density in log weight
+n_rec <- n_rec * params@w[rec_idx]
+plot(ssb, n_rec, type = "l", log = "xy",
+     xlim = c(1e-5, 1e-1), ylim = c(1e-5, 1e-2))
+```
+
+
+# Random plankton
+
+Switch on randomness for plankton carrying capacity
+```{r}
+plankton_state$random <- TRUE
+```
+Of course our figures will not look exactly like those in the paper because we
+will get a different randomisation, but they will be qualitatively the same.
+
+We set an initial abundance and run for 10 years.
+```{r}
+params@initial_n[] <- 0.001 * params@w^(-1.8)
+params@initial_n_pp[] <- params@cc_pp
+simr <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
+```
+
+At this point we reduce the anchovy abundance by an overall factor of 10^7
+and then run the simulation for a further 30 years.
+
+```{r}
+simr@n[11, , ] <- simr@n[11, , ] / 10^7
+simr <- project(simr, t_max = 30, dt = p$dt, t_save = 0.2, progress_bar = FALSE)
+```
+
+## Figure 4a
+```{r message=FALSE, warning=FALSE}
+abm <- melt(getBiomass(simr))
+pbm <- simr@n_pp %*% (params@w_full * params@dw_full)
+pbm <- melt(pbm)
+pbm$Var2 <- NULL
+pbm$sp = "Plankton"
+bm <- rbind(abm, pbm)
+plot_ly(bm) %>% 
+    filter(time >= 10) %>% 
+    add_lines(x = ~time, y = ~value, color = ~sp) %>% 
+    # Use logarithmic axes
+    layout(p, yaxis = list(type = "log", exponentformat = "power",
+                           title_text = "biomass (g/m^3)",
+                           range = c(-3.2, 0.8)),
+           xaxis = list(title_text = "time (year)"))
+```
+
+## Figure 4b
+
+```{r}
+t_min_idx <- sum(as.numeric(dimnames(siml@n)$time) <= 15)
+t_max_idx <- dim(siml@n)[1]
+t_step_idx <- 1 / 0.2  # 1 year steps
+ssb <- getSSB(simr)[seq(t_min_idx, t_max_idx - t_step_idx, t_step_idx)]
+rec_idx <- sum(params@w < 10)
+n_rec <- simr@n[seq(t_min_idx + t_step_idx, t_max_idx, t_step_idx), , rec_idx]
+# Convert to density in log weight
+n_rec <- n_rec * params@w[rec_idx]
+plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
+     xlab = "spawning stock biomass (g/m^3)", xlim = c(1e-3, 1),
+     ylab = "density of recruits (1/m^3)")
+```
