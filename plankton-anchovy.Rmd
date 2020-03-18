@@ -104,7 +104,7 @@ plankton_logistic <- function(params,
                               n = params@initial_n, 
                               n_pp = params@initial_n_pp, 
                               B = params@initial_B, 
-                              rates = getRates(params), 
+                              rates = mizerRates(params), 
                               dt = 0.1, ...) {
     plankton_state$time <- plankton_state$time + dt
     if (plankton_state$random && plankton_state$time >= 0.5) {
@@ -159,7 +159,8 @@ setModel <- function(p) {
     pred_kernel_type = "norm_box",
     h = Inf,
     R_max = Inf,
-    linecolour = "brown")
+    linecolour = "brown",
+    stringsAsFactors = FALSE)
   
   no_w <- round(log(p$w_inf / p$w_min) / p$dx)
   
@@ -170,14 +171,15 @@ setModel <- function(p) {
     kappa = kappa,
     w_pp_cutoff = p$w_pp_cutoff,
     q = p$alpha,
-    plankton_dynamics = plankton_logistic)
+    plankton_dynamics = "plankton_logistic")
 
   params@rr_pp[] <- p$r0 * params@w_full^(p$rho - 1)
   return(params)
 }
 
 params <- setModel(p)
-i <- p$i0 * params@w_full^(-params@lambda) * exp(-6.9*(params@lambda - 1))
+i <- p$i0 * params@w_full^(-params@plankton_params$lambda) * 
+  exp(-6.9*(params@plankton_params$lambda - 1))
 ```
 
 # Without larval mortality or cannibalism
