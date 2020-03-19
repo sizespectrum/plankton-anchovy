@@ -95,10 +95,12 @@ plankton_state <- new.env(parent = emptyenv())
 plankton_state$time <- 0
 plankton_state$factor <- 1
 plankton_state$random <- FALSE
+plankton_state$phi <- 0
+plankton_state$sigma <- 0.5
 ```
 
 We implement the logistic plankton dynamics with immigration, as described in
-equation (A.11)
+equation (A.11), allowing the carrying capacity to be random when required.
 ```{r}
 plankton_logistic <- function(params, 
                               n = params@initial_n, 
@@ -107,9 +109,18 @@ plankton_logistic <- function(params,
                               rates = getRates(params), 
                               dt = 0.1, ...) {
     plankton_state$time <- plankton_state$time + dt
-    if (plankton_state$random && plankton_state$time >= 0.5) {
+    if (plankton_state$random == "paper" && plankton_state$time >= 0.5) {
+        # This is the random factor by which we multiply the carrying capacity
+        # in the paper, which changes once every six months to a new
+        # independent random value
         plankton_state$factor <- exp(runif(1, log(1/2), log(2)))
         plankton_state$time <- 0
+    } else if (plankton_state$random == "red") {
+        # Here the random factor multiplying the carrying capacity changes
+        # at every time step and is given as the exponential of an AR(1)
+        # process, i.e., red noise.
+        plankton_state$factor <- plankton_state$factor ^ plankton_state$phi * 
+          exp(rnorm(1, 0, plankton_state$sigma))
     }
     f <- params@rr_pp * n_pp * (1 - n_pp / params@cc_pp / plankton_state$factor) + 
         i - rates$plankton_mort * n_pp 
@@ -159,7 +170,8 @@ setModel <- function(p) {
     pred_kernel_type = "norm_box",
     h = Inf,
     R_max = Inf,
-    linecolour = "brown")
+    linecolour = "brown",
+    stringsAsFactors = FALSE)
   
   no_w <- round(log(p$w_inf / p$w_min) / p$dx)
   
@@ -343,6 +355,8 @@ plot_ly(nf) %>%
                         range = c(-8, 0)))
 ```
 
+
+
 # With larval mortality
 Turn on larval mortality
 ```{r}
@@ -422,9 +436,12 @@ plot(ssb, n_rec, type = "l", log = "xy",
 
 # Random plankton
 
-Switch on randomness for plankton carrying capacity
+Switch on the randomness for plankton carrying capacity used in the original
+paper.
 ```{r}
-plankton_state$random <- TRUE
+set.seed(0)
+plankton_state$random <- "paper"
+plankton_state$factor <- 1
 ```
 Of course our figures will not look exactly like those in the paper because we
 will get a different randomisation, but they will be qualitatively the same.
@@ -465,8 +482,8 @@ plot_ly(bm) %>%
 ## Figure 4b
 
 ```{r}
-t_min_idx <- sum(as.numeric(dimnames(siml@n)$time) <= 15)
-t_max_idx <- dim(siml@n)[1]
+t_min_idx <- sum(as.numeric(dimnames(simr@n)$time) <= 15)
+t_max_idx <- dim(simr@n)[1]
 t_step_idx <- 1 / 0.2  # 1 year steps
 ssb <- getSSB(simr)[seq(t_min_idx, t_max_idx - t_step_idx, t_step_idx)]
 rec_idx <- sum(params@w < 10)
@@ -477,3 +494,91 @@ plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
      xlab = "spawning stock biomass (g/m^3)", xlim = c(1e-3, 1),
      ylab = "density of recruits (1/m^3)")
 ```
+
+
+# Random plankton driven by red noise
+
+One of the referees suggested we should use red noise to drive the plankton
+randomness. So we now multiply the carrying capacity of the plankton by a
+factor given by the exponential of an AR(1) process. Denoting the carrying
+capacity at time $t$ for plankton of size $w$, we use
+$$K(w, t) = K(w, 0)  \exp(X(t))$$
+where
+$$X(t+dt) = (1 - 0.5\,dt) X(t) + 10\, \eta(t)\, dt$$
+and $\eta(t)$ are independent standard normally distributed random variables. 
+We start with $X(0)=0$. This process can be seen as the discretisation of the 
+Ornstein-Uhlenbeck process satisfying the SDE
+$$dX(t) = -0.5\, X(t)\, dt + 10\, dW(t)$$
+where $W$ is the Wiener process.
+
+The random factor $F(t)=\exp(X(t))$ satisfies
+$$F(t+dt) = F(t)^{1-0.5dt}\exp(10\,\eta\, dt)$$
+with $F(0)=1$. We will use a time step \(dt =\) `r p$dt`
+```{r}
+set.seed(0)
+plankton_state$random <- "red"
+plankton_state$factor <- 1
+plankton_state$sigma <- 10 * p$dt
+plankton_state$phi <- 1 - 0.5 * p$dt
+```
+
+We set an initial abundance and run for 10 years.
+```{r}
+params@initial_n[] <- 0.001 * params@w^(-1.8)
+params@initial_n_pp[] <- params@cc_pp
+simrr <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
+```
+
+At this point we reduce the anchovy abundance by an overall factor of 10^7
+and then run the simulation for a further 30 years.
+
+```{r}
+simrr@n[11, , ] <- simrr@n[11, , ] / 10^7
+simrr <- project(simrr, t_max = 30, dt = p$dt, t_save = 0.1, progress_bar = FALSE)
+```
+
+## Figure 4a
+```{r message=FALSE, warning=FALSE}
+abm <- melt(getBiomass(simrr))
+pbm <- simrr@n_pp %*% (params@w_full * params@dw_full)
+pbm <- melt(pbm)
+pbm$Var2 <- NULL
+pbm$sp = "Plankton"
+bm <- rbind(abm, pbm)
+plot_ly(bm) %>% 
+    filter(time >= 10) %>% 
+    add_lines(x = ~time, y = ~value, color = ~sp) %>% 
+    # Use logarithmic axes
+    layout(p, yaxis = list(type = "log", exponentformat = "power",
+                           title_text = "biomass (g/m^3)",
+                           range = c(-3, 0.8)),
+           xaxis = list(title_text = "time (year)"))
+```
+
+## Figure 4b
+
+```{r}
+t_min_idx <- sum(as.numeric(dimnames(simrr@n)$time) <= 15)
+t_max_idx <- dim(simrr@n)[1]
+t_step_idx <- 1 / 0.1  # 1 year steps
+ssb <- getSSB(simrr)[seq(t_min_idx, t_max_idx - t_step_idx, t_step_idx)]
+rec_idx <- sum(params@w < 10)
+n_rec <- simrr@n[seq(t_min_idx + t_step_idx, t_max_idx, t_step_idx), , rec_idx]
+# Convert to density in log weight
+n_rec <- n_rec * params@w[rec_idx]
+plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
+     xlab = "spawning stock biomass (g/m^3)", xlim = c(1e-3, 1),
+     ylab = "density of recruits (1/m^3)")
+```
+
+
+
+The exponent of the power-law power spectrum:
+```{r}
+m$coefficients[[2]]
+```
+
+
+
+
+
