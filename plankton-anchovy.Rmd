@@ -14,11 +14,13 @@ library(magrittr)
 library(plotly)
 ```
 
-The code below reproduces key computations from the paper "
-Regulation of fish stocks without stock-recruitment relationships: the case of 
+The code below reproduces key computations from the paper
+"Regulation of fish stocks without stock-recruitment relationships: the case of 
 small pelagic fish" by Mariella Canales, Gustav Delius and Richard Law, using 
 the R package mizer to implement the size-spectrum model. This notebook should 
 be used after reading that paper. 
+
+This notebook requires mizer version 2.0 or later.
 
 # Setting up the model
 We set up the model according to the description in the paper in Appendix A,
@@ -102,12 +104,7 @@ plankton_state$sigma <- 0.5
 We implement the logistic plankton dynamics with immigration, as described in
 equation (A.11), allowing the carrying capacity to be random when required.
 ```{r}
-plankton_logistic <- function(params, 
-                              n = params@initial_n, 
-                              n_pp = params@initial_n_pp, 
-                              B = params@initial_B, 
-                              rates = getRates(params), 
-                              dt = 0.1, ...) {
+plankton_logistic <- function(params, n, n_pp, n_other, rates, dt = 0.1, ...) {
     plankton_state$time <- plankton_state$time + dt
     if (plankton_state$random == "paper" && plankton_state$time >= 0.5) {
         # This is the random factor by which we multiply the carrying capacity
@@ -123,7 +120,7 @@ plankton_logistic <- function(params,
           exp(rnorm(1, 0, plankton_state$sigma))
     }
     f <- params@rr_pp * n_pp * (1 - n_pp / params@cc_pp / plankton_state$factor) + 
-        i - rates$plankton_mort * n_pp 
+        i - rates$resource_mort * n_pp 
     f[is.na(f)] <- 0
     return(n_pp + dt * f)
 }
@@ -182,7 +179,7 @@ setModel <- function(p) {
     kappa = kappa,
     w_pp_cutoff = p$w_pp_cutoff,
     q = p$alpha,
-    plankton_dynamics = "plankton_logistic")
+    resource_dynamics = "plankton_logistic")
 
   params@rr_pp[] <- p$r0 * params@w_full^(p$rho - 1)
   return(params)
@@ -493,6 +490,15 @@ n_rec <- n_rec * params@w[rec_idx]
 plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
      xlab = "spawning stock biomass (g/m^3)", xlim = c(1e-3, 1),
      ylab = "density of recruits (1/m^3)")
+```
+
+# Survivorship
+
+## Figure 5b
+
+First we calculate survivorship for a cohort as a function of size.
+```{r}
+
 ```
 
 
