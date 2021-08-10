@@ -71,21 +71,21 @@ described in equations (A.5) and (A.6).
 ```{r}
 setAnchovyMort <- 
   function(params, p) {
-    w <- w(params)
-    mu_b <- rep(0, length(w))
-    mu_b[w <= p$w_s] <- 
-      (p$mu_0 * (w / p$w_min)^p$rho_b)[w < p$w_s]
+    mu_b <- rep(0, length(params@w))
+    mu_b[params@w <= p$w_s] <- 
+      (p$mu_0 * (params@w / p$w_min)^p$rho_b)[params@w < p$w_s]
     if (p$mu_0 > 0) {
-      mu_s <- min(mu_b[w <= p$w_s])
+      mu_s <- min(mu_b[params@w <= p$w_s])
     } else {
       mu_s <- p$mu_s
     }
-    mu_b[w >= p$w_s] <- 
-      (mu_s * (w / p$w_s)^p$rho_s)[w >= p$w_s]
+    mu_b[params@w >= p$w_s] <- 
+      (mu_s * (params@w / p$w_s)^p$rho_s)[params@w >= p$w_s]
     # Add larval mortality
-    mu_b <- mu_b + p$mu_l / (1 + (w / p$w_l)^p$rho_l)
-    z0 <- array(mu_b, dim = c(1, length(mu_b)))
-    return(setExtMort(params, z0 = z0))
+    mu_b <- mu_b + p$mu_l / (1 + (params@w / p$w_l)^p$rho_l)
+    
+    params@mu_b[] <- mu_b
+    return(params)
   }
 ```
 
@@ -119,9 +119,7 @@ plankton_logistic <- function(params, n, n_pp, n_other, rates, dt = 0.1, ...) {
         plankton_state$factor <- plankton_state$factor ^ plankton_state$phi * 
           exp(rnorm(1, 0, plankton_state$sigma))
     }
-    rr_pp <- getResourceRate(params)
-    cc_pp <- getResourceCapacity(params)
-    f <- rr_pp * n_pp * (1 - n_pp / cc_pp / plankton_state$factor) + 
+    f <- params@rr_pp * n_pp * (1 - n_pp / params@cc_pp / plankton_state$factor) + 
         i - rates$resource_mort * n_pp 
     f[is.na(f)] <- 0
     return(n_pp + dt * f)
@@ -183,26 +181,26 @@ setModel <- function(p) {
     q = p$alpha,
     resource_dynamics = "plankton_logistic")
 
-  return(setResource(params, resource_rate = p$r0 * params@w_full^(p$rho - 1)))
+  params@rr_pp[] <- p$r0 * params@w_full^(p$rho - 1)
+  return(params)
 }
 
 params <- setModel(p)
-i <- p$i0 * w_full(params)^(-p$lambda) * exp(-6.9*(p$lambda - 1))
+i <- p$i0 * params@w_full^(-p$lambda) * exp(-6.9*(p$lambda - 1))
 ```
 
 # Without larval mortality or cannibalism
 We first run the model without larval mortality and without cannibalism
 ```{r}
 p$mu_l <- 0
-params <- params %>% 
-  setAnchovyMort(p) %>% 
-  setInteraction(interaction = 0)
+params <- setAnchovyMort(params, p)
+params@interaction[] <- 0
 ```
 
 We set an initial abundance and run for 10 years.
 ```{r}
-initialN(params)[] <- 0.001 * w(params)^(-1.8)
-initialNResource(params) <- getResourceCapacity(params)
+params@initial_n[] <- 0.001 * params@w^(-1.8)
+params@initial_n_pp[] <- params@cc_pp
 sim <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
 ```
 
@@ -248,7 +246,7 @@ plot_ly(mort) %>%
 ## Figure 2c
 ```{r message=FALSE, warning=FALSE}
 abm <- melt(getBiomass(sim))
-pbm <- NResource(sim) %*% (w_full(params) * dw_full(params))
+pbm <- sim@n_pp %*% (params@w_full * params@dw_full)
 pbm <- melt(pbm)
 pbm$Var2 <- NULL
 pbm$sp = "Plankton"
@@ -266,7 +264,7 @@ plot_ly(bm) %>%
 # With cannibalism
 Turn on cannibalism
 ```{r}
-params <- setInteraction(params, interaction = 1)
+params@interaction[] <- 1
 ```
 
 We set an initial abundance and run for 10 years.
@@ -578,3 +576,15 @@ plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
      xlab = "spawning stock biomass (g/m^3)", xlim = c(1e-3, 1),
      ylab = "density of recruits (1/m^3)")
 ```
+
+
+
+The exponent of the power-law power spectrum:
+```{r}
+m$coefficients[[2]]
+```
+
+
+
+
+
