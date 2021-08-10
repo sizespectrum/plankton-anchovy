@@ -14,11 +14,13 @@ library(magrittr)
 library(plotly)
 ```
 
-The code below reproduces key computations from the paper "
-Regulation of fish stocks without stock-recruitment relationships: the case of 
+The code below reproduces key computations from the paper
+"Regulation of fish stocks without stock-recruitment relationships: the case of 
 small pelagic fish" by Mariella Canales, Gustav Delius and Richard Law, using 
 the R package mizer to implement the size-spectrum model. This notebook should 
 be used after reading that paper. 
+
+This notebook requires mizer version 2.0 or later.
 
 # Setting up the model
 We set up the model according to the description in the paper in Appendix A,
@@ -69,21 +71,21 @@ described in equations (A.5) and (A.6).
 ```{r}
 setAnchovyMort <- 
   function(params, p) {
-    mu_b <- rep(0, length(params@w))
-    mu_b[params@w <= p$w_s] <- 
-      (p$mu_0 * (params@w / p$w_min)^p$rho_b)[params@w < p$w_s]
+    w <- w(params)
+    mu_b <- rep(0, length(w))
+    mu_b[w <= p$w_s] <- 
+      (p$mu_0 * (w / p$w_min)^p$rho_b)[w < p$w_s]
     if (p$mu_0 > 0) {
-      mu_s <- min(mu_b[params@w <= p$w_s])
+      mu_s <- min(mu_b[w <= p$w_s])
     } else {
       mu_s <- p$mu_s
     }
-    mu_b[params@w >= p$w_s] <- 
-      (mu_s * (params@w / p$w_s)^p$rho_s)[params@w >= p$w_s]
+    mu_b[w >= p$w_s] <- 
+      (mu_s * (w / p$w_s)^p$rho_s)[w >= p$w_s]
     # Add larval mortality
-    mu_b <- mu_b + p$mu_l / (1 + (params@w / p$w_l)^p$rho_l)
-    
-    params@mu_b[] <- mu_b
-    return(params)
+    mu_b <- mu_b + p$mu_l / (1 + (w / p$w_l)^p$rho_l)
+    z0 <- array(mu_b, dim = c(1, length(mu_b)))
+    return(setExtMort(params, z0 = z0))
   }
 ```
 
@@ -95,24 +97,32 @@ plankton_state <- new.env(parent = emptyenv())
 plankton_state$time <- 0
 plankton_state$factor <- 1
 plankton_state$random <- FALSE
+plankton_state$phi <- 0
+plankton_state$sigma <- 0.5
 ```
 
 We implement the logistic plankton dynamics with immigration, as described in
-equation (A.11)
+equation (A.11), allowing the carrying capacity to be random when required.
 ```{r}
-plankton_logistic <- function(params, 
-                              n = params@initial_n, 
-                              n_pp = params@initial_n_pp, 
-                              B = params@initial_B, 
-                              rates = mizerRates(params), 
-                              dt = 0.1, ...) {
+plankton_logistic <- function(params, n, n_pp, n_other, rates, dt = 0.1, ...) {
     plankton_state$time <- plankton_state$time + dt
-    if (plankton_state$random && plankton_state$time >= 0.5) {
+    if (plankton_state$random == "paper" && plankton_state$time >= 0.5) {
+        # This is the random factor by which we multiply the carrying capacity
+        # in the paper, which changes once every six months to a new
+        # independent random value
         plankton_state$factor <- exp(runif(1, log(1/2), log(2)))
         plankton_state$time <- 0
+    } else if (plankton_state$random == "red") {
+        # Here the random factor multiplying the carrying capacity changes
+        # at every time step and is given as the exponential of an AR(1)
+        # process, i.e., red noise.
+        plankton_state$factor <- plankton_state$factor ^ plankton_state$phi * 
+          exp(rnorm(1, 0, plankton_state$sigma))
     }
-    f <- params@rr_pp * n_pp * (1 - n_pp / params@cc_pp / plankton_state$factor) + 
-        i - rates$plankton_mort * n_pp 
+    rr_pp <- getResourceRate(params)
+    cc_pp <- getResourceCapacity(params)
+    f <- rr_pp * n_pp * (1 - n_pp / cc_pp / plankton_state$factor) + 
+        i - rates$resource_mort * n_pp 
     f[is.na(f)] <- 0
     return(n_pp + dt * f)
 }
@@ -165,35 +175,34 @@ setModel <- function(p) {
   no_w <- round(log(p$w_inf / p$w_min) / p$dx)
   
   params <- set_multispecies_model(
-    no_w = no_w,
     species_params,
+    no_w = no_w,
     lambda = p$lambda,
     kappa = kappa,
     w_pp_cutoff = p$w_pp_cutoff,
     q = p$alpha,
-    plankton_dynamics = "plankton_logistic")
+    resource_dynamics = "plankton_logistic")
 
-  params@rr_pp[] <- p$r0 * params@w_full^(p$rho - 1)
-  return(params)
+  return(setResource(params, resource_rate = p$r0 * params@w_full^(p$rho - 1)))
 }
 
 params <- setModel(p)
-i <- p$i0 * params@w_full^(-params@plankton_params$lambda) * 
-  exp(-6.9*(params@plankton_params$lambda - 1))
+i <- p$i0 * w_full(params)^(-p$lambda) * exp(-6.9*(p$lambda - 1))
 ```
 
 # Without larval mortality or cannibalism
 We first run the model without larval mortality and without cannibalism
 ```{r}
 p$mu_l <- 0
-params <- setAnchovyMort(params, p)
-params@interaction[] <- 0
+params <- params %>% 
+  setAnchovyMort(p) %>% 
+  setInteraction(interaction = 0)
 ```
 
 We set an initial abundance and run for 10 years.
 ```{r}
-params@initial_n[] <- 0.001 * params@w^(-1.8)
-params@initial_n_pp[] <- params@cc_pp
+initialN(params)[] <- 0.001 * w(params)^(-1.8)
+initialNResource(params) <- getResourceCapacity(params)
 sim <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
 ```
 
@@ -239,7 +248,7 @@ plot_ly(mort) %>%
 ## Figure 2c
 ```{r message=FALSE, warning=FALSE}
 abm <- melt(getBiomass(sim))
-pbm <- sim@n_pp %*% (params@w_full * params@dw_full)
+pbm <- NResource(sim) %*% (w_full(params) * dw_full(params))
 pbm <- melt(pbm)
 pbm$Var2 <- NULL
 pbm$sp = "Plankton"
@@ -257,7 +266,7 @@ plot_ly(bm) %>%
 # With cannibalism
 Turn on cannibalism
 ```{r}
-params@interaction[] <- 1
+params <- setInteraction(params, interaction = 1)
 ```
 
 We set an initial abundance and run for 10 years.
@@ -345,6 +354,8 @@ plot_ly(nf) %>%
                         range = c(-8, 0)))
 ```
 
+
+
 # With larval mortality
 Turn on larval mortality
 ```{r}
@@ -424,9 +435,12 @@ plot(ssb, n_rec, type = "l", log = "xy",
 
 # Random plankton
 
-Switch on randomness for plankton carrying capacity
+Switch on the randomness for plankton carrying capacity used in the original
+paper.
 ```{r}
-plankton_state$random <- TRUE
+set.seed(0)
+plankton_state$random <- "paper"
+plankton_state$factor <- 1
 ```
 Of course our figures will not look exactly like those in the paper because we
 will get a different randomisation, but they will be qualitatively the same.
@@ -467,12 +481,97 @@ plot_ly(bm) %>%
 ## Figure 4b
 
 ```{r}
-t_min_idx <- sum(as.numeric(dimnames(siml@n)$time) <= 15)
-t_max_idx <- dim(siml@n)[1]
+t_min_idx <- sum(as.numeric(dimnames(simr@n)$time) <= 15)
+t_max_idx <- dim(simr@n)[1]
 t_step_idx <- 1 / 0.2  # 1 year steps
 ssb <- getSSB(simr)[seq(t_min_idx, t_max_idx - t_step_idx, t_step_idx)]
 rec_idx <- sum(params@w < 10)
 n_rec <- simr@n[seq(t_min_idx + t_step_idx, t_max_idx, t_step_idx), , rec_idx]
+# Convert to density in log weight
+n_rec <- n_rec * params@w[rec_idx]
+plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
+     xlab = "spawning stock biomass (g/m^3)", xlim = c(1e-3, 1),
+     ylab = "density of recruits (1/m^3)")
+```
+
+# Survivorship
+
+## Figure 5b
+
+First we calculate survivorship for a cohort as a function of size.
+```{r}
+
+```
+
+
+# Random plankton driven by red noise
+
+One of the referees suggested we should use red noise to drive the plankton
+randomness. So we now multiply the carrying capacity of the plankton by a
+factor given by the exponential of an AR(1) process. Denoting the carrying
+capacity at time $t$ for plankton of size $w$, we use
+$$K(w, t) = K(w, 0)  \exp(X(t))$$
+where
+$$X(t+dt) = (1 - 0.5\,dt) X(t) + 10\, \eta(t)\, dt$$
+and $\eta(t)$ are independent standard normally distributed random variables. 
+We start with $X(0)=0$. This process can be seen as the discretisation of the 
+Ornstein-Uhlenbeck process satisfying the SDE
+$$dX(t) = -0.5\, X(t)\, dt + 10\, dW(t)$$
+where $W$ is the Wiener process.
+
+The random factor $F(t)=\exp(X(t))$ satisfies
+$$F(t+dt) = F(t)^{1-0.5dt}\exp(10\,\eta\, dt)$$
+with $F(0)=1$. We will use a time step \(dt =\) `r p$dt`
+```{r}
+set.seed(0)
+plankton_state$random <- "red"
+plankton_state$factor <- 1
+plankton_state$sigma <- 10 * p$dt
+plankton_state$phi <- 1 - 0.5 * p$dt
+```
+
+We set an initial abundance and run for 10 years.
+```{r}
+params@initial_n[] <- 0.001 * params@w^(-1.8)
+params@initial_n_pp[] <- params@cc_pp
+simrr <- project(params, t_max = 10, dt = p$dt, progress_bar = FALSE)
+```
+
+At this point we reduce the anchovy abundance by an overall factor of 10^7
+and then run the simulation for a further 30 years.
+
+```{r}
+simrr@n[11, , ] <- simrr@n[11, , ] / 10^7
+simrr <- project(simrr, t_max = 30, dt = p$dt, t_save = 0.1, progress_bar = FALSE)
+```
+
+## Figure 4a
+```{r message=FALSE, warning=FALSE}
+abm <- melt(getBiomass(simrr))
+pbm <- simrr@n_pp %*% (params@w_full * params@dw_full)
+pbm <- melt(pbm)
+pbm$Var2 <- NULL
+pbm$sp = "Plankton"
+bm <- rbind(abm, pbm)
+plot_ly(bm) %>% 
+    filter(time >= 10) %>% 
+    add_lines(x = ~time, y = ~value, color = ~sp) %>% 
+    # Use logarithmic axes
+    layout(p, yaxis = list(type = "log", exponentformat = "power",
+                           title_text = "biomass (g/m^3)",
+                           range = c(-3, 0.8)),
+           xaxis = list(title_text = "time (year)"))
+```
+
+## Figure 4b
+
+```{r}
+t_min_idx <- sum(as.numeric(dimnames(simrr@n)$time) <= 15)
+t_max_idx <- dim(simrr@n)[1]
+t_step_idx <- 1 / 0.1  # 1 year steps
+ssb <- getSSB(simrr)[seq(t_min_idx, t_max_idx - t_step_idx, t_step_idx)]
+rec_idx <- sum(params@w < 10)
+n_rec <- simrr@n[seq(t_min_idx + t_step_idx, t_max_idx, t_step_idx), , rec_idx]
 # Convert to density in log weight
 n_rec <- n_rec * params@w[rec_idx]
 plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
