@@ -9,7 +9,6 @@ fig_height: 4
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(mizer)
-library(reshape2)
 library(magrittr)
 library(plotly)
 ```
@@ -232,8 +231,9 @@ Figure 2b plots the death rate on the anchovy as a function of anchovy body
 size.
 ```{r}
 t <- as.numeric(dimnames(sim@n)$time) == 30
-mort <- getMort(params, n = sim@n[t, , ],
-                n_pp = sim@n_pp[t, ], effort = 0)
+nt <- params@initial_n # Just to get the right dimensions
+nt[] <- sim@n[t, , ]
+mort <- getMort(params, n = nt, n_pp = sim@n_pp[t, ], effort = 0)
 mort <- melt(mort)
 plot_ly(mort) %>% 
     add_lines(x = ~w_prey, y = ~value) %>% 
@@ -288,8 +288,9 @@ While Figure 2d shows the background death and the larval death separately,
 here for simplicity we plot only their sum.
 ```{r}
 t <- as.numeric(dimnames(simc@n)$time) == 36.8
-mort <- getMort(params, n = simc@n[t, , ],
-                n_pp = simc@n_pp[t, ], effort = 0)
+nt <- params@initial_n # Just to get the right dimensions
+nt[] <- simc@n[t, , ]
+mort <- getMort(params, n = nt, n_pp = simc@n_pp[t, ], effort = 0)
 mort <- melt(mort)
 plot_ly(mort) %>% 
     add_lines(x = ~w_prey, y = ~value) %>% 
@@ -380,8 +381,9 @@ siml <- project(siml, t_max = 30, dt = p$dt, t_save = 0.2, progress_bar = FALSE)
 I have not yet split the mortality up into its causes in the following figure. But overall it looks right.
 ```{r}
 t <- as.numeric(dimnames(siml@n)$time) == 30
-mort <- getMort(params, n = siml@n[t, , ],
-                n_pp = siml@n_pp[t, ], effort = 0)
+nt <- params@initial_n # Just to get the right dimensions
+nt[] <- siml@n[t, , ]
+mort <- getMort(params, n = nt, n_pp = siml@n_pp[t, ], effort = 0)
 mort <- melt(mort)
 plot_ly(mort) %>% 
     add_lines(x = ~w_prey, y = ~value) %>% 
@@ -576,15 +578,3 @@ plot(ssb, n_rec, log = "xy", ylim = c(1e-5, 1e-1), pch = 20,
      xlab = "spawning stock biomass (g/m^3)", xlim = c(1e-3, 1),
      ylab = "density of recruits (1/m^3)")
 ```
-
-
-
-The exponent of the power-law power spectrum:
-```{r}
-m$coefficients[[2]]
-```
-
-
-
-
-
