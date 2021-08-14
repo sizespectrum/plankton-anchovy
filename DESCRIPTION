@@ -3,7 +3,7 @@ Version: 1.0
 Date: 2021-08-14
 Description: "Using mizer to reproduce key computations from the paper 'Regulation of fish stocks without stock-recruitment relationships: the case of small pelagic fish" by Mariella Canales, Gustav Delius and Richard Law."
 Imports:
-  mizer
+  mizer,
   knitr,
   magrittr,
   plotly,
